@@ -1,0 +1,52 @@
+# FAILGROUND configuration
+
+agent:
+  model: "gpt-4o-mini"
+  base_url: "https://api.openai.com/v1"
+  api_key: "${OPENAI_API_KEY}"
+  max_steps: 20
+
+mast_classifier:
+  model: "Qwen/Qwen2.5-7B-Instruct"
+  base_url: "http://localhost:8000/v1"
+  api_key: "EMPTY"
+
+embedding:
+  model: "all-MiniLM-L6-v2"   # sentence-transformers, local, free
+
+fakg:
+  budget: 500               # max active FailureNodes before AFM eviction
+  afm_alpha: 0.4            # frequency weight
+  afm_beta: 0.4             # recency weight
+  afm_gamma: 0.2            # task-similarity weight
+  afm_lambda: 0.01          # temporal decay rate
+  afm_fifo: false           # set true for ablation A4
+
+ccsr:
+  fcs_threshold: 0.3        # FCS > this triggers correction check
+  sim_threshold: 0.7        # task-similarity threshold
+
+sparql:
+  wikidata_endpoint: "https://query.wikidata.org/sparql"
+  conceptnet_dump: null     # path to local ConceptNet 5.5 assertions.csv
+
+benchmarks:
+  alfworld:
+    env_type: "tw"
+    max_episodes: 100
+  intercode_sql:
+    db_path: "benchmarks/intercode/data"
+    max_episodes: 100
+  webarena_lite:
+    base_url: "http://localhost:7780"
+    max_episodes: 50
+
+output_dir: "results/"
+
+ablations:
+  A1: false   # FPT -> standard (h,r,t)
+  A2: false   # remove CAUSED_BY/CORRECTED_BY edges
+  A3: false   # CCSR -> BM25 top-3
+  A4: false   # AFM -> FIFO eviction
+  A5: false   # gamma=0 in AFM priority
+  A6: false   # remove gamma-mode filter in CCSR

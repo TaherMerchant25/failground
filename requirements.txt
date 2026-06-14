@@ -1,0 +1,31 @@
+# Core
+openai>=1.0.0
+networkx>=3.0
+numpy>=1.24
+requests>=2.31
+pyyaml>=6.0
+tqdm>=4.65
+tiktoken>=0.5
+
+# Embeddings (local, free)
+sentence-transformers>=2.2.2
+
+# Entity linking
+spacy>=3.7
+# run: python -m spacy download en_core_web_sm
+
+# Benchmarks
+# ALFWorld
+alfworld>=0.3.3
+
+# InterCode (install from cloned repo)
+# pip install -e benchmarks/intercode
+
+# WebArena-Lite (install from cloned repo)
+# pip install -e benchmarks/visualwebarena
+
+# Optional: BM25 for ablation A3
+rank_bm25>=0.2.2
+
+# Graph viz (optional)
+matplotlib>=3.7
