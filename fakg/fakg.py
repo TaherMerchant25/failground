@@ -20,6 +20,7 @@ from typing import Optional
 import networkx as nx
 
 from fakg.fpt import FPT
+from tools.entity_linking import normalize_entity
 
 
 class FAKG:
@@ -36,9 +37,11 @@ class FAKG:
     # Node helpers
     # ------------------------------------------------------------------
 
-    def _add_world_node(self, entity: str, qid: Optional[str] = None, uri: Optional[str] = None):
+    def _add_world_node(self, entity: str, qid: Optional[str] = None, uri: Optional[str] = None) -> str:
+        entity = normalize_entity(entity)
         if not self.G.has_node(entity):
             self.G.add_node(entity, node_type="WorldNode", qid=qid, uri=uri)
+        return entity
 
     def _add_task_node(self, task_id: str, embedding: list[float], env: str):
         if not self.G.has_node(task_id):
@@ -48,10 +51,17 @@ class FAKG:
     # Core: add failure
     # ------------------------------------------------------------------
 
-    def add_failure(self, fpt: FPT, task_id: str, task_embedding: list[float], env: str):
+    def add_failure(
+        self,
+        fpt: FPT,
+        task_id: str,
+        task_embedding: list[float],
+        env: str,
+        mention_entities: Optional[list[str]] = None,
+    ):
         """Insert an FPT into the graph, wiring all cross-layer edges."""
-        self._add_world_node(fpt.h, qid=fpt.wikidata_qid_h, uri=fpt.conceptnet_uri_h)
-        self._add_world_node(fpt.a_correct, qid=fpt.wikidata_qid_correct)
+        h_key = self._add_world_node(fpt.h, qid=fpt.wikidata_qid_h, uri=fpt.conceptnet_uri_h)
+        correct_key = self._add_world_node(fpt.a_correct, qid=fpt.wikidata_qid_correct)
         self._add_task_node(task_id, task_embedding, env)
 
         fn_id = fpt.fpt_id
@@ -63,9 +73,15 @@ class FAKG:
             priority=fpt.priority,
         )
 
-        self.G.add_edge(fn_id, fpt.h, edge_type="CAUSED_BY")
-        self.G.add_edge(fn_id, fpt.a_correct, edge_type="CORRECTED_BY")
+        self.G.add_edge(fn_id, h_key, edge_type="CAUSED_BY")
+        self.G.add_edge(fn_id, correct_key, edge_type="CORRECTED_BY")
         self.G.add_edge(task_id, fn_id, edge_type="EXPERIENCED")
+
+        # Index action-level noun-chunk entities so CCSR lookup finds this node
+        for me in (mention_entities or []):
+            me_key = self._add_world_node(me)
+            if me_key != h_key:
+                self.G.add_edge(fn_id, me_key, edge_type="MENTIONS")
 
         self._fpt_index[fn_id] = fpt
 
@@ -73,11 +89,11 @@ class FAKG:
         self._hr_fail[key] = self._hr_fail.get(key, 0) + 1
 
     def record_attempt(self, h: str, r: str):
-        key = (h, r)
+        key = (normalize_entity(h), r)
         self._hr_attempt[key] = self._hr_attempt.get(key, 0) + 1
 
     def get_confidence(self, h: str, r: str) -> float:
-        key = (h, r)
+        key = (normalize_entity(h), r)
         attempts = self._hr_attempt.get(key, 0)
         fails = self._hr_fail.get(key, 0)
         if attempts == 0:
@@ -105,15 +121,32 @@ class FAKG:
         ]
 
     def failure_nodes_for_entity(self, entity: str) -> list[FPT]:
-        """All active FailureNodes with CAUSED_BY -> entity."""
+        """All active FailureNodes with CAUSED_BY or MENTIONS edge -> entity."""
+        entity = normalize_entity(entity)
         result = []
         if not self.G.has_node(entity):
             return result
+        seen: set[str] = set()
         for pred in self.G.predecessors(entity):
             d = self.G.nodes[pred]
             if d.get("node_type") == "FailureNode" and d.get("is_active", False):
-                result.append(self._fpt_index[pred])
+                edge_type = self.G.edges[pred, entity].get("edge_type", "")
+                if edge_type in ("CAUSED_BY", "MENTIONS") and pred not in seen:
+                    seen.add(pred)
+                    result.append(self._fpt_index[pred])
         return result
+
+    def flat_lookup(self, entity: str) -> list[FPT]:
+        """
+        A2 ablation: no provenance-edge traversal. Matches only the bare
+        claim subject (h), ignoring MENTIONS/action-context entities and
+        the CAUSED_BY/CORRECTED_BY graph structure entirely.
+        """
+        entity = normalize_entity(entity)
+        return [
+            fpt for fpt in self._fpt_index.values()
+            if normalize_entity(fpt.h) == entity and fpt.is_active
+        ]
 
     # ------------------------------------------------------------------
     # Ghost state

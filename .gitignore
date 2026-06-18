@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+results/
+results_archive_ctxhint_bug/
+results_invalid_archive/
+logs/
+.env

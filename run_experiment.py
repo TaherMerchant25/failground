@@ -28,6 +28,7 @@ from fakg.mast import MASTClassifier
 from pipeline.failure_miner import FailureMiner
 from agent.react_agent import FAILGROUNDReActAgent
 from agent.envs import ALFWorldEnv, InterCodeSQLEnv, WebArenaLiteEnv
+import sys; sys.stdout.reconfigure(line_buffering=True)
 from eval.metrics import EpisodeResult, compute_metrics
 from tools.io_file import create_if_not_exist
 
@@ -37,13 +38,18 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def build_system(cfg: dict, ablation: str):
+def _resolve_env(val: str) -> str:
+    import re
+    return re.sub(r'\$\{(\w+)\}', lambda m: os.environ.get(m.group(1), ""), str(val))
+
+
+def build_system(cfg: dict, ablation: str, method: str = "FAILGROUND"):
     fakg = FAKG()
 
     mast = MASTClassifier(
         model=cfg["mast_classifier"]["model"],
         base_url=cfg["mast_classifier"]["base_url"],
-        api_key=cfg["mast_classifier"].get("api_key", "EMPTY"),
+        api_key=_resolve_env(cfg["mast_classifier"].get("api_key", "EMPTY")),
     )
 
     embedder = SentenceTransformer(cfg["embedding"]["model"])
@@ -59,6 +65,7 @@ def build_system(cfg: dict, ablation: str):
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=512,
+                timeout=60,
             ).choices[0].message.content
         except Exception as e:
             return f"[LLM error: {e}]"
@@ -67,6 +74,10 @@ def build_system(cfg: dict, ablation: str):
         fakg=fakg,
         fcs_threshold=cfg["ccsr"]["fcs_threshold"],
         sim_threshold=cfg["ccsr"]["sim_threshold"],
+        retrieval_mode="topk" if ablation == "A3" else "coverage",
+        use_task_sim_filter=(ablation not in ("A1", "A6")),
+        use_provenance=(ablation != "A2"),
+        disabled=(method == "baseline"),
     )
 
     afm = AFM(
@@ -85,6 +96,7 @@ def build_system(cfg: dict, ablation: str):
         llm_fn=llm_fn,
         embed_fn=embed_fn,
         conceptnet_dump=cfg["sparql"].get("conceptnet_dump"),
+        ablation=ablation,
     )
 
     agent = FAILGROUNDReActAgent(
@@ -142,21 +154,33 @@ def run_benchmark(bench: str, agent, miner, afm, fakg, embed_fn, cfg, n_episodes
                     result = self._e.step(action)
                     self.success = self._e.success
                     return result
+                def grounding_context(self):
+                    gc = getattr(self._e, "grounding_context", None)
+                    return gc() if gc else {}
 
             shim = _EnvShim(env)
             episode = agent.run(task_text, shim)
 
-            new_fpts = miner.mine_episode(agent.trajectory, task_text, env_name, ep_idx)
+            new_fpts, mine_stats = miner.mine_episode(agent.trajectory, task_text, env_name, ep_idx)
             for fpt in new_fpts:
+                afm.reactivate_if_seen(fpt.h, fpt.r)  # reactivate ghost nodes before adding
                 afm.on_add(fpt, ep_idx, task_emb)
 
             corrections_injected = sum(
                 1 for s in episode["trajectory"] if s.get("correction_injected")
             )
+            corrections_effective = sum(
+                1 for s in episode["trajectory"]
+                if s.get("correction_injected") and not s.get("step_failed", True)
+            )
             results.append(EpisodeResult(
                 success=episode["success"],
                 steps=episode["steps"],
+                hallucinated_steps=mine_stats.get("schema_hallucinated_steps", mine_stats["failed_steps"]),
+                total_entities_checked=episode["steps"],
+                entities_covered=mine_stats.get("schema_covered", 0),
                 corrections_injected=corrections_injected,
+                corrections_effective=corrections_effective,
             ))
             fakg_sizes.append(len(fakg))
 
@@ -168,6 +192,7 @@ def run_benchmark(bench: str, agent, miner, afm, fakg, embed_fn, cfg, n_episodes
     growth = (fakg_sizes[-1] - fakg_sizes[0]) / max(len(fakg_sizes), 1) if fakg_sizes else 0
     fakg_stats = {**afm.stats(), "growth_rate": growth}
     metrics = compute_metrics(results, fakg_stats)
+    total_injected = sum(r.corrections_injected for r in results)
     return {
         "tsr": metrics.tsr,
         "shr": metrics.shr,
@@ -176,6 +201,7 @@ def run_benchmark(bench: str, agent, miner, afm, fakg, embed_fn, cfg, n_episodes
         "fakg_growth": metrics.fakg_growth_rate,
         "churn": metrics.memory_churn_rate,
         "n_episodes": metrics.n_episodes,
+        "corrections_injected": total_injected,
         "str": str(metrics),
     }
 
@@ -187,6 +213,8 @@ def main():
                         default="alfworld")
     parser.add_argument("--ablation", default="none",
                         choices=["none", "A1", "A2", "A3", "A4", "A5", "A6"])
+    parser.add_argument("--method", default="FAILGROUND",
+                        choices=["FAILGROUND", "baseline"])
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--output", default="results/")
@@ -194,7 +222,7 @@ def main():
 
     cfg = load_config(args.config)
     create_if_not_exist(args.output)
-    agent, miner, afm, fakg, embed_fn = build_system(cfg, args.ablation)
+    agent, miner, afm, fakg, embed_fn = build_system(cfg, args.ablation, args.method)
 
     benchmarks = (
         ["alfworld", "intercode", "webarena"]
@@ -202,19 +230,21 @@ def main():
         else [args.benchmark]
     )
 
+    tag = args.method if args.method != "FAILGROUND" else args.ablation
+
     all_results = {}
     for bench in benchmarks:
-        print(f"\n=== {bench.upper()} | ablation={args.ablation} | episodes={args.episodes} ===")
+        print(f"\n=== {bench.upper()} | method={args.method} ablation={args.ablation} | episodes={args.episodes} ===")
         metrics = run_benchmark(bench, agent, miner, afm, fakg, embed_fn, cfg, args.episodes)
         print(f"  {metrics['str']}")
         all_results[bench] = metrics
 
-    out_path = Path(args.output) / f"{args.benchmark}_{args.ablation}.json"
+    out_path = Path(args.output) / f"{args.benchmark}_{tag}.json"
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nResults -> {out_path}")
 
-    fakg_path = Path(args.output) / f"fakg_{args.benchmark}_{args.ablation}.json"
+    fakg_path = Path(args.output) / f"fakg_{args.benchmark}_{tag}.json"
     fakg.save(str(fakg_path))
     print(f"FAKG  -> {fakg_path}  ({len(fakg)} failure nodes)")
     print(f"AFM   -> {afm.stats()}")

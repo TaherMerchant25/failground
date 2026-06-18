@@ -26,16 +26,26 @@ except ImportError:
     def _get_nlp(): return None
 
 
+def normalize_entity(s: str) -> str:
+    """Lowercase + strip for consistent FAKG store/lookup."""
+    return s.strip().lower()
+
+
 def extract_entities(text: str) -> list[str]:
-    """Extract named entities from text. Returns deduplicated list."""
+    """Extract named entities and noun chunks from text. Returns deduplicated list."""
     nlp = _get_nlp()
     if nlp is not None:
         doc = nlp(text)
-        entities = list({ent.text.strip() for ent in doc.ents if len(ent.text.strip()) > 1})
-        return entities
-    # Fallback: capitalized word sequences
-    matches = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', text)
-    return list(set(matches))
+        entities = {ent.text.strip() for ent in doc.ents if len(ent.text.strip()) > 1}
+        # also include noun chunk roots (covers common nouns like "apple", "table", SQL table names)
+        for chunk in doc.noun_chunks:
+            t = chunk.root.lemma_.strip().lower()
+            if len(t) > 2:
+                entities.add(t)
+        return list(entities)
+    # Fallback: all words longer than 3 chars
+    words = re.findall(r'\b[a-zA-Z]{4,}\b', text)
+    return list({w.lower() for w in words})
 
 
 def extract_atomic_claims(action_text: str, llm_fn) -> list[dict]:
@@ -50,8 +60,11 @@ def extract_atomic_claims(action_text: str, llm_fn) -> list[dict]:
         f"Output as JSON array: [{{'h': '...', 'r': '...', 't': '...'}}]"
     )
     try:
-        import json
+        import json, re
         response = llm_fn(prompt)
+        # strip markdown code fences (LLM often wraps with ```json ... ```)
+        response = re.sub(r'^```(?:json)?\s*', '', response.strip())
+        response = re.sub(r'\s*```$', '', response.strip())
         claims = json.loads(response)
         return claims if isinstance(claims, list) else []
     except Exception:

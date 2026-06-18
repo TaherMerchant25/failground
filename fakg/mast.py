@@ -42,6 +42,7 @@ class MASTClassifier:
                 ],
                 response_format={"type": "json_object"},
                 max_tokens=256,
+                timeout=10,
             )
             data = json.loads(resp.choices[0].message.content)
             gamma = data.get("failure_mode", "unverifiable")

@@ -4,12 +4,12 @@ agent:
   model: "gpt-4o-mini"
   base_url: "https://api.openai.com/v1"
   api_key: "${OPENAI_API_KEY}"
-  max_steps: 20
+  max_steps: 15
 
 mast_classifier:
-  model: "Qwen/Qwen2.5-7B-Instruct"
-  base_url: "http://localhost:8000/v1"
-  api_key: "EMPTY"
+  model: "gpt-4o-mini"
+  base_url: "https://api.openai.com/v1"
+  api_key: "${OPENAI_API_KEY}"
 
 embedding:
   model: "all-MiniLM-L6-v2"   # sentence-transformers, local, free
